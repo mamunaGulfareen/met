@@ -97,7 +97,7 @@ export default function ARView({ coin, onBack }) {
   const prevTimeRef = useRef(Date.now());
   const userHeadingRef = useRef(null);
 
-  
+
   // Keep ref to userLocation for animation loop
   const userLocationRef = useRef(null);
   useEffect(() => {
@@ -107,10 +107,14 @@ export default function ARView({ coin, onBack }) {
   // Watch user location
 
   useEffect(() => {
-     const handlePosition = (pos) => {
+    const handlePosition = (pos) => {
       const { latitude, longitude, heading } = pos.coords;
+      setUserLocation({ latitude, longitude });
       userLocationRef.current = { latitude, longitude };
-      if (heading !== null && !isNaN(heading)) userHeadingRef.current = heading;
+      if (heading !== null && !isNaN(heading)) {
+        setUserHeading(heading);           // <-- update state
+        userHeadingRef.current = heading;
+      }
     };
     // Function to process new location
     // const handlePosition = (pos) => {
@@ -280,13 +284,15 @@ export default function ARView({ coin, onBack }) {
 
         // Distance & angle
         const distance = haversineDistance(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
-        setDistanceToCoin(distance);
+        setDistanceToCoin(prev => smoothValue(prev, distance, 0.3));
         const bearingToCoin = calculateBearing(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
-        let angle = Math.abs(((bearingToCoin - currentHeading) + 360) % 360);
+        let angle = ((bearingToCoin - currentHeading + 360) % 360);
         if (angle > 180) angle = 360 - angle;
-        setAngleDiff(angle);
+        angle = Math.min(Math.max(angle, 0), 180);
+        setAngleDiff(prev => smoothValue(prev, angle, 0.3));
 
         const visible = angle <= 90 && distance <= 100;
+        canCollectRef.current = visible;
         setCanCollect(visible);
         modelRef.current.visible = visible;
 
