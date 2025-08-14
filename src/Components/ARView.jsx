@@ -32,6 +32,23 @@ function haversineDistance(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
+function adaptiveSmooth(prev, next, deltaTime, minFactor = 0.05, maxFactor = 0.5) {
+  if (prev === null || isNaN(prev)) return next;
+
+  // Difference between previous and new value
+  const diff = Math.abs(next - prev);
+
+  // Speed proportional factor (more diff = less smoothing)
+  let factor = diff / deltaTime;
+
+  // Clamp factor between min and max
+  factor = Math.max(minFactor, Math.min(maxFactor, factor));
+
+  return prev + (next - prev) * factor;
+}
+
+
+
 // Bearing calculation
 function calculateBearing(lat1, lon1, lat2, lon2) {
   const toRad = (deg) => (deg * Math.PI) / 180;
@@ -44,9 +61,18 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
   let brng = toDeg(Math.atan2(y, x));
   return (brng + 360) % 360;
 }
-function smoothValue(prev, next, factor = 0.2) {
+function smoothValue(prev, next, deltaTime, lastSpeed = 0) {
   if (prev === null || isNaN(prev)) return next;
-  return prev + (next - prev) * factor;
+
+  // Speed calculate karo (change / time)
+  const change = Math.abs(next - prev);
+  const speed = change / (deltaTime || 0.016); // default ~60fps
+
+  // Smoothing factor adjust karo: fast movement => higher factor
+  // Clamp between 0.1 and 0.9
+  const smoothingFactor = Math.min(0.9, Math.max(0.1, speed * 0.05));
+
+  return prev + (next - prev) * smoothingFactor;
 }
 
 function latLngToPosition(userPos, coinPos) {
@@ -179,6 +205,7 @@ export default function ARView({ coin, onBack }) {
       // Android and others: add listeners immediately
       window.addEventListener('deviceorientationabsolute', handleOrientation, true);
       window.addEventListener('deviceorientation', handleOrientation, true);
+
     }
 
     // Cleanup
@@ -259,48 +286,63 @@ export default function ARView({ coin, onBack }) {
 
     const animate = () => {
       const now = Date.now();
-      const deltaTime = now - prevTimeRef.current; // ms
+      const deltaTime = (now - prevTimeRef.current) / 1000; // in seconds
       prevTimeRef.current = now;
 
       const currentLocation = userLocationRef.current;
       const currentHeading = userHeadingRef.current;
 
       if (modelRef.current && currentLocation) {
-        // Speed & dynamic smoothing
-        const speed = getSpeed(currentLocation, prevLocationRef.current, deltaTime);
+        // --- 1. Calculate speed in m/s
+        const speed = getSpeed(currentLocation, prevLocationRef.current, deltaTime * 1000); // getSpeed expects ms
         prevLocationRef.current = currentLocation;
-        const smoothingFactor = Math.min(0.5, 0.05 + Math.min(speed * 1000 / 5, 0.45)); // dynamic
 
-        // Coin position
+        // --- 2. Dynamic smoothing factor
+        // Faster speed = closer to 1.0 (instant update), slower = closer to 0.1 (smooth)
+        const fastFactor = Math.min(0.95, Math.max(0.1, speed * 2)); // speed * 2 gives quicker reaction
+
+        // --- 3. Calculate target coin position
         const targetPos = latLngToPosition(currentLocation, coin);
-        modelRef.current.position.x = smoothValue(modelRef.current.position.x, targetPos.x, smoothingFactor);
-        modelRef.current.position.y = smoothValue(modelRef.current.position.y, targetPos.y, smoothingFactor);
-        modelRef.current.position.z = smoothValue(modelRef.current.position.z, targetPos.z, smoothingFactor);
+        modelRef.current.position.x = smoothValue(modelRef.current.position.x, targetPos.x, fastFactor);
+        modelRef.current.position.y = smoothValue(modelRef.current.position.y, targetPos.y, fastFactor);
+        modelRef.current.position.z = smoothValue(modelRef.current.position.z, targetPos.z, fastFactor);
 
-        // Camera rotation
-        const prevHeading = cameraRef.current.rotation.y * 180 / Math.PI;
-        const smoothedHeading = smoothValue(prevHeading, currentHeading, smoothingFactor);
-        cameraRef.current.rotation.y = -smoothedHeading * Math.PI / 180;
+        // --- 4. Camera rotation based on heading
+        if (currentHeading != null) {
+          const prevHeading = cameraRef.current.rotation.y * 180 / Math.PI;
+          const smoothedHeading = smoothValue(prevHeading, currentHeading, fastFactor);
+          cameraRef.current.rotation.y = -smoothedHeading * Math.PI / 180;
+        }
 
-        // Distance & angle
+        // --- 5. Distance & angle
         const distance = haversineDistance(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
-        setDistanceToCoin(prev => smoothValue(prev, distance, 0.3));
         const bearingToCoin = calculateBearing(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
         let angle = ((bearingToCoin - currentHeading + 360) % 360);
         if (angle > 180) angle = 360 - angle;
-        angle = Math.min(Math.max(angle, 0), 180);
-        setAngleDiff(prev => smoothValue(prev, angle, 0.3));
 
+        // --- 6. Update UI values faster when moving fast or turning quickly
+        const angleChange = Math.abs(angle - (angleDiff ?? angle));
+        const uiFactor = Math.max(fastFactor, angleChange > 15 ? 0.8 : 0.3);
+
+        setDistanceToCoin(prev => smoothValue(prev, distance, uiFactor));
+        setAngleDiff(prev => smoothValue(prev, angle, uiFactor));
+
+        // --- 7. Visibility
         const visible = angle <= 90 && distance <= 100;
         canCollectRef.current = visible;
         setCanCollect(visible);
         modelRef.current.visible = visible;
 
-        // Scale & rotation
+        // --- 8. Scaling & rotation
         if (visible) {
           const scale = 1 - Math.min(distance / 100, 1) * 0.7;
           modelRef.current.scale.set(scale, scale, scale);
-          modelRef.current.traverse((child) => { if (child.material) { child.material.transparent = true; child.material.opacity = scale; } });
+          modelRef.current.traverse((child) => {
+            if (child.material) {
+              child.material.transparent = true;
+              child.material.opacity = scale;
+            }
+          });
           modelRef.current.rotation.y += 0.01;
         }
       }
