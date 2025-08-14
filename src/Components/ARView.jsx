@@ -74,9 +74,8 @@ function latLngToPosition(userPos, coinPos) {
 const getSpeed = (current, prev, deltaTime) => {
   if (!prev || deltaTime === 0) return 0;
   const distance = haversineDistance(prev.latitude, prev.longitude, current.latitude, current.longitude);
-  return distance / deltaTime; // meters per ms
+  return distance / deltaTime; // meters/ms
 };
-
 
 export default function ARView({ coin, onBack }) {
   const containerRef = useRef();
@@ -94,9 +93,11 @@ export default function ARView({ coin, onBack }) {
   const canCollectRef = useRef(false);
   const [angleDiff, setAngleDiff] = useState(null);
   const [iosPermissionGranted, setIosPermissionGranted] = useState(false);
-const prevLocationRef = useRef(null);
-const prevTimeRef = useRef(Date.now());
+  const prevLocationRef = useRef(null);
+  const prevTimeRef = useRef(Date.now());
+  const userHeadingRef = useRef(null);
 
+  
   // Keep ref to userLocation for animation loop
   const userLocationRef = useRef(null);
   useEffect(() => {
@@ -106,22 +107,27 @@ const prevTimeRef = useRef(Date.now());
   // Watch user location
 
   useEffect(() => {
-    // Function to process new location
-    const handlePosition = (pos) => {
-      const { latitude, longitude, accuracy, heading } = pos.coords;
-
-      // // Ignore low-accuracy readings (> 20m)
-      // if (accuracy > 20) {
-      //   console.log(`Skipping low accuracy: ${accuracy}m`);
-      //   return;
-      // }
-
-      setUserLocation({ latitude, longitude });
-      // Only update GPS heading if moving
-      if (heading !== null && !isNaN(heading)) {
-        setUserHeading(heading); // adjust 0.05-0.3 for smoothness
-      }
+     const handlePosition = (pos) => {
+      const { latitude, longitude, heading } = pos.coords;
+      userLocationRef.current = { latitude, longitude };
+      if (heading !== null && !isNaN(heading)) userHeadingRef.current = heading;
     };
+    // Function to process new location
+    // const handlePosition = (pos) => {
+    //   const { latitude, longitude, accuracy, heading } = pos.coords;
+
+    //   // // Ignore low-accuracy readings (> 20m)
+    //   // if (accuracy > 20) {
+    //   //   console.log(`Skipping low accuracy: ${accuracy}m`);
+    //   //   return;
+    //   // }
+
+    //   setUserLocation({ latitude, longitude });
+    //   // Only update GPS heading if moving
+    //   if (heading !== null && !isNaN(heading)) {
+    //     setUserHeading(heading); // adjust 0.05-0.3 for smoothness
+    //   }
+    // };
 
     // Get initial location quickly
     navigator.geolocation.getCurrentPosition(
@@ -248,65 +254,54 @@ const prevTimeRef = useRef(Date.now());
     );
 
     const animate = () => {
-  const now = Date.now();
-  const deltaTime = now - prevTimeRef.current; // ms
-  prevTimeRef.current = now;
+      const now = Date.now();
+      const deltaTime = now - prevTimeRef.current; // ms
+      prevTimeRef.current = now;
 
-  const currentLocation = userLocationRef.current;
+      const currentLocation = userLocationRef.current;
+      const currentHeading = userHeadingRef.current;
 
-  if (modelRef.current && currentLocation ) {
-    // Speed calculate karo
-    const speed = getSpeed(currentLocation, prevLocationRef.current, deltaTime); // m/ms
-    prevLocationRef.current = currentLocation;
+      if (modelRef.current && currentLocation) {
+        // Speed & dynamic smoothing
+        const speed = getSpeed(currentLocation, prevLocationRef.current, deltaTime);
+        prevLocationRef.current = currentLocation;
+        const smoothingFactor = Math.min(0.5, 0.05 + Math.min(speed * 1000 / 5, 0.45)); // dynamic
 
-    // Dynamic smoothing factor
-    let smoothingFactor = Math.min(0.2, 0.05 + speed / 20); // fast move → high factor
+        // Coin position
+        const targetPos = latLngToPosition(currentLocation, coin);
+        modelRef.current.position.x = smoothValue(modelRef.current.position.x, targetPos.x, smoothingFactor);
+        modelRef.current.position.y = smoothValue(modelRef.current.position.y, targetPos.y, smoothingFactor);
+        modelRef.current.position.z = smoothValue(modelRef.current.position.z, targetPos.z, smoothingFactor);
 
-    // Target coin position
-    const targetPos = latLngToPosition(currentLocation, coin);
+        // Camera rotation
+        const prevHeading = cameraRef.current.rotation.y * 180 / Math.PI;
+        const smoothedHeading = smoothValue(prevHeading, currentHeading, smoothingFactor);
+        cameraRef.current.rotation.y = -smoothedHeading * Math.PI / 180;
 
-    // Apply dynamic smoothing
-    modelRef.current.position.x = smoothValue(modelRef.current.position.x, targetPos.x, smoothingFactor);
-    modelRef.current.position.y = smoothValue(modelRef.current.position.y, targetPos.y, smoothingFactor);
-    modelRef.current.position.z = smoothValue(modelRef.current.position.z, targetPos.z, smoothingFactor);
+        // Distance & angle
+        const distance = haversineDistance(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
+        setDistanceToCoin(distance);
+        const bearingToCoin = calculateBearing(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
+        let angle = Math.abs(((bearingToCoin - currentHeading) + 360) % 360);
+        if (angle > 180) angle = 360 - angle;
+        setAngleDiff(angle);
 
-    // Camera rotation smooth
-    const prevHeading = cameraRef.current.rotation.y * 180 / Math.PI;
-    const smoothedHeading = smoothValue(prevHeading, userHeading, smoothingFactor);
-    cameraRef.current.rotation.y = -smoothedHeading * Math.PI / 180;
+        const visible = angle <= 90 && distance <= 100;
+        setCanCollect(visible);
+        modelRef.current.visible = visible;
 
-    // Distance & angle update
-    const distance = haversineDistance(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
-    setDistanceToCoin(distance);
-    canCollectRef.current = distance <= 100;
-    setCanCollect(distance <= 100);
+        // Scale & rotation
+        if (visible) {
+          const scale = 1 - Math.min(distance / 100, 1) * 0.7;
+          modelRef.current.scale.set(scale, scale, scale);
+          modelRef.current.traverse((child) => { if (child.material) { child.material.transparent = true; child.material.opacity = scale; } });
+          modelRef.current.rotation.y += 0.01;
+        }
+      }
 
-    const bearingToCoin = calculateBearing(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
-    let angle = Math.abs(((bearingToCoin - userHeading) + 360) % 360);
-    if (angle > 180) angle = 360 - angle;
-    setAngleDiff(angle);
-
-    // Coin visibility
-    const vector = new THREE.Vector3(modelRef.current.position.x, modelRef.current.position.y, modelRef.current.position.z);
-    vector.project(cameraRef.current);
-    const onScreen = vector.z < 1 && vector.x > -1 && vector.x < 1 && vector.y > -1 && vector.y < 1;
-    modelRef.current.visible = angle <= 90 && distance <= 100 && onScreen;
-
-    // Scale & opacity
-    if (modelRef.current.visible) {
-      const distCenter = Math.sqrt(vector.x * vector.x + vector.y * vector.y);
-      const scale = 1 - Math.min(distCenter, 1) * 0.7;
-      modelRef.current.scale.set(scale, scale, scale);
-      modelRef.current.traverse((child) => {
-        if (child.material) { child.material.transparent = true; child.material.opacity = scale; }
-      });
-      modelRef.current.rotation.y += 0.01;
-    }
-  }
-
-  rendererRef.current.render(scene, cameraRef.current);
-  animationFrameIdRef.current = requestAnimationFrame(animate);
-};
+      rendererRef.current.render(scene, cameraRef.current);
+      animationFrameIdRef.current = requestAnimationFrame(animate);
+    };
 
 
 
