@@ -283,7 +283,7 @@ export default function ARView({ coin, onBack }) {
         const onScreen = vector.z < 1 && vector.x > -1 && vector.x < 1 && vector.y > -1 && vector.y < 1;
 
         // Visibility condition: angle diff, distance, aur camera view check kar ke
-        const visible = angleDiff <= 30 && distance <= 100 && onScreen;
+        const visible = angleDiff <= 90 && distance <= 100 && onScreen;
 
         modelRef.current.visible = visible;
         setAngleDiff(angleDiff);
@@ -292,10 +292,13 @@ export default function ARView({ coin, onBack }) {
           // Model ki 3D position set karo
           modelRef.current.position.set(relativePos.x, relativePos.y, relativePos.z);
 
-          // Thodi rotation lagao
+           // Thodi rotation lagao
           modelRef.current.rotation.y += 0.01;
 
-          
+          // Screen position nikaalo pixels mein
+          const screenX = (vector.x + 1) / 2 * window.innerWidth;
+          const screenY = (-vector.y + 1) / 2 * window.innerHeight;
+
           // Distance from center (0,0) to vector point (x,y)
           const distFromCenter = Math.sqrt(vector.x * vector.x + vector.y * vector.y);
           const scale = 1 - Math.min(distFromCenter, 1) * 0.7;
@@ -452,7 +455,7 @@ export default function ARView({ coin, onBack }) {
         }}
       >
         <div>Angle to coin: {angleDiff !== null ? `${Math.round(angleDiff)}°` : 'N/A'}</div>
-        <div>Facing coin: {angleDiff !== null ? (angleDiff <= 30 ? '✅' : '❌') : 'N/A'}</div>
+        <div>Facing coin: {angleDiff !== null ? (angleDiff <= 90 ? '✅' : '❌') : 'N/A'}</div>
         <div>Distance: {distanceToCoin !== null ? `${distanceToCoin.toFixed(1)} m` : 'N/A'}</div>
         {/* <div>Heading: {userHeading !== null ? `${Math.round(userHeading)}°` : 'N/A'}</div> */}
       </div>
