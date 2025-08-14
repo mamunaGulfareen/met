@@ -44,12 +44,10 @@ function calculateBearing(lat1, lon1, lat2, lon2) {
   let brng = toDeg(Math.atan2(y, x));
   return (brng + 360) % 360;
 }
-// Utility to smooth values
-function smoothValue(prev, next, smoothingFactor = 0.2) {
-  if (prev === null || isNaN(prev)) return next; // first value
-  return prev + (next - prev) * smoothingFactor;
+function smoothValue(prev, next, factor = 0.2) {
+  if (prev === null || isNaN(prev)) return next;
+  return prev + (next - prev) * factor;
 }
-
 
 function latLngToPosition(userPos, coinPos) {
   const R = 6371000; // Earth radius in meters
@@ -73,6 +71,11 @@ function latLngToPosition(userPos, coinPos) {
 }
 
 
+const getSpeed = (current, prev, deltaTime) => {
+  if (!prev || deltaTime === 0) return 0;
+  const distance = haversineDistance(prev.latitude, prev.longitude, current.latitude, current.longitude);
+  return distance / deltaTime; // meters per ms
+};
 
 
 export default function ARView({ coin, onBack }) {
@@ -91,6 +94,8 @@ export default function ARView({ coin, onBack }) {
   const canCollectRef = useRef(false);
   const [angleDiff, setAngleDiff] = useState(null);
   const [iosPermissionGranted, setIosPermissionGranted] = useState(false);
+const prevLocationRef = useRef(null);
+const prevTimeRef = useRef(Date.now());
 
   // Keep ref to userLocation for animation loop
   const userLocationRef = useRef(null);
@@ -243,82 +248,66 @@ export default function ARView({ coin, onBack }) {
     );
 
     const animate = () => {
-      animationFrameIdRef.current = requestAnimationFrame(animate);
+  const now = Date.now();
+  const deltaTime = now - prevTimeRef.current; // ms
+  prevTimeRef.current = now;
 
-      const currentLocation = userLocationRef.current;
+  const currentLocation = userLocationRef.current;
 
-      if (modelRef.current && currentLocation) {
-        // Distance calculate karo
-        const distance = haversineDistance(
-          currentLocation.latitude,
-          currentLocation.longitude,
-          coin.lat,
-          coin.lng
-        );
+  if (modelRef.current && currentLocation ) {
+    // Speed calculate karo
+    const speed = getSpeed(currentLocation, prevLocationRef.current, deltaTime); // m/ms
+    prevLocationRef.current = currentLocation;
 
-        setDistanceToCoin(distance);
-        canCollectRef.current = distance <= 100;
-        setCanCollect(distance <= 100);
+    // Dynamic smoothing factor
+    let smoothingFactor = Math.min(0.2, 0.05 + speed / 20); // fast move → high factor
 
-        // Bearing calculate karo coin ki taraf
-        const bearingToCoin = calculateBearing(
-          currentLocation.latitude,
-          currentLocation.longitude,
-          coin.lat,
-          coin.lng
-        );
+    // Target coin position
+    const targetPos = latLngToPosition(currentLocation, coin);
 
-        // Angle difference user heading aur coin bearing ke beech
-        let angleDiff = Math.abs(((bearingToCoin - userHeading) + 360) % 360);
-        if (angleDiff > 180) angleDiff = 360 - angleDiff;
+    // Apply dynamic smoothing
+    modelRef.current.position.x = smoothValue(modelRef.current.position.x, targetPos.x, smoothingFactor);
+    modelRef.current.position.y = smoothValue(modelRef.current.position.y, targetPos.y, smoothingFactor);
+    modelRef.current.position.z = smoothValue(modelRef.current.position.z, targetPos.z, smoothingFactor);
 
-        // 3D relative position nikaalo
-        const relativePos = latLngToPosition(currentLocation, coin);
+    // Camera rotation smooth
+    const prevHeading = cameraRef.current.rotation.y * 180 / Math.PI;
+    const smoothedHeading = smoothValue(prevHeading, userHeading, smoothingFactor);
+    cameraRef.current.rotation.y = -smoothedHeading * Math.PI / 180;
 
-        // 3D position ko project karo 2D screen coordinates mein
-        const vector = new THREE.Vector3(relativePos.x, relativePos.y, relativePos.z);
-        vector.project(cameraRef.current);
+    // Distance & angle update
+    const distance = haversineDistance(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
+    setDistanceToCoin(distance);
+    canCollectRef.current = distance <= 100;
+    setCanCollect(distance <= 100);
 
-        // Check karo ke object camera ke view mein hai ke nahi
-        const onScreen = vector.z < 1 && vector.x > -1 && vector.x < 1 && vector.y > -1 && vector.y < 1;
+    const bearingToCoin = calculateBearing(currentLocation.latitude, currentLocation.longitude, coin.lat, coin.lng);
+    let angle = Math.abs(((bearingToCoin - userHeading) + 360) % 360);
+    if (angle > 180) angle = 360 - angle;
+    setAngleDiff(angle);
 
-        // Visibility condition: angle diff, distance, aur camera view check kar ke
-        const visible = angleDiff <= 90 && distance <= 100 && onScreen;
+    // Coin visibility
+    const vector = new THREE.Vector3(modelRef.current.position.x, modelRef.current.position.y, modelRef.current.position.z);
+    vector.project(cameraRef.current);
+    const onScreen = vector.z < 1 && vector.x > -1 && vector.x < 1 && vector.y > -1 && vector.y < 1;
+    modelRef.current.visible = angle <= 90 && distance <= 100 && onScreen;
 
-        modelRef.current.visible = visible;
-        setAngleDiff(angleDiff);
+    // Scale & opacity
+    if (modelRef.current.visible) {
+      const distCenter = Math.sqrt(vector.x * vector.x + vector.y * vector.y);
+      const scale = 1 - Math.min(distCenter, 1) * 0.7;
+      modelRef.current.scale.set(scale, scale, scale);
+      modelRef.current.traverse((child) => {
+        if (child.material) { child.material.transparent = true; child.material.opacity = scale; }
+      });
+      modelRef.current.rotation.y += 0.01;
+    }
+  }
 
-        if (visible) {
-          // Model ki 3D position set karo
-          modelRef.current.position.set(relativePos.x, relativePos.y, relativePos.z);
+  rendererRef.current.render(scene, cameraRef.current);
+  animationFrameIdRef.current = requestAnimationFrame(animate);
+};
 
-           // Thodi rotation lagao
-          modelRef.current.rotation.y += 0.01;
-
-          // Screen position nikaalo pixels mein
-          const screenX = (vector.x + 1) / 2 * window.innerWidth;
-          const screenY = (-vector.y + 1) / 2 * window.innerHeight;
-
-          // Distance from center (0,0) to vector point (x,y)
-          const distFromCenter = Math.sqrt(vector.x * vector.x + vector.y * vector.y);
-          const scale = 1 - Math.min(distFromCenter, 1) * 0.7;
-          modelRef.current.scale.set(scale, scale, scale);
-          if (modelRef.current.material) {
-            modelRef.current.material.opacity = scale;
-            modelRef.current.material.transparent = true;
-          }
-        }
-
-        // Camera rotation update karo user heading ke mutabiq (sirf yaw)
-        if (cameraRef.current) {
-          const headingRad = (userHeading * Math.PI) / 180;
-          cameraRef.current.rotation.set(0, 0, 0);
-          cameraRef.current.rotation.y = -headingRad;
-        }
-      }
-
-      rendererRef.current.render(scene, cameraRef.current);
-    };
 
 
     const setupCamera = async () => {
